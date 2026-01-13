@@ -1,0 +1,7 @@
+{
+    "threshold_ram": 85,
+    "threshold_cpu": 85,
+    "monitor_interval": 250,
+    "auto_optimize_enabled": true,
+    "silent_mode": true
+}
