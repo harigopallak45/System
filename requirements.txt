@@ -1,0 +1,5 @@
+psutil
+wmi
+pycaw
+comtypes
+screen-brightness-control

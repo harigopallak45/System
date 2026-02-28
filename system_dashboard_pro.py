@@ -13,6 +13,7 @@ from collections import deque
 from datetime import datetime, timedelta
 import math
 import json
+import urllib.request
 
 try:
     import wmi
@@ -35,6 +36,15 @@ try:
     HAS_SBC = True
 except ImportError:
     HAS_SBC = False
+
+
+# --- High DPI Setup ---
+try:
+    # Set DPI awareness for Windows 8.1+
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    # Set DPI awareness for Windows Vista/7/8
+    ctypes.windll.user32.SetProcessDPIAware()
 
 # --- Windows API structures ---
 class SYSTEM_POWER_STATUS(ctypes.Structure):
@@ -415,6 +425,7 @@ class SystemDashboardPro:
         self.last_cpu_optimize_time = 0
         self.auto_optimize_cooldown = 60
         self.silent_mode = self.config.get('silent_mode', True)
+        self.net_load_active = False
         
         # Saved Hardware Levels
         self.saved_volumes = self.config.get('volumes', {})
@@ -684,8 +695,8 @@ class SystemDashboardPro:
         actions_grid = tk.Frame(actions_card, bg=ModernTheme.BG_CARD)
         actions_grid.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
         
-        self.create_action_button(actions_grid, "⚡ Optimize RAM", 
-                                  self.optimize_ram).pack(fill=tk.X, pady=5)
+        self.create_action_button(actions_grid, "⚡ Optimize System", 
+                                  self.optimize_system).pack(fill=tk.X, pady=5)
         self.create_action_button(actions_grid, "🗑️ Clear Cache",
                                   self.clear_cache).pack(fill=tk.X, pady=5)
         self.create_action_button(actions_grid, "📊 Full Report",
@@ -1399,6 +1410,46 @@ class SystemDashboardPro:
             except Exception as e:
                 pass
     
+    def get_gpu_info_advanced(self):
+        """Advanced GPU detection including dedicated memory"""
+        gpus = []
+        try:
+            # PowerShell to get VideoController info
+            cmd = ["powershell", "-Command", "Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, AdapterRAM | ConvertTo-Json"]
+            res = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
+            
+            if res:
+                data = json.loads(res)
+                if isinstance(data, dict): data = [data]
+                
+                for d in data:
+                    name = d.get('Name', 'Unknown GPU')
+                    ram_bytes = d.get('AdapterRAM', 0)
+                    ded_mem = f"{ram_bytes/(1024**3):.1f} GB" if ram_bytes and ram_bytes > 0 else "Shared/N/A"
+                    gpus.append({"name": name, "memory": ded_mem, "driver": d.get('DriverVersion', 'Unknown')})
+        except: pass
+        return gpus
+
+    def get_disk_info_advanced(self):
+        """Advanced Disk detection"""
+        disks = []
+        try:
+            cmd = ["powershell", "-Command", "Get-PhysicalDisk | Select-Object Model, MediaType, Size | ConvertTo-Json"]
+            res = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
+            
+            if res:
+                data = json.loads(res)
+                if isinstance(data, dict): data = [data]
+                for d in data:
+                    size_gb = f"{int(d.get('Size', 0))/(1024**3):.0f} GB"
+                    disks.append({
+                        "model": d.get('Model', 'Unknown'),
+                        "type": d.get('MediaType', 'Unknown'),
+                        "size": size_gb
+                    })
+        except: pass
+        return disks
+
     def show_devices(self):
         """Devices view showing all connected hardware with controls"""
         self.switch_section("devices")
@@ -1441,20 +1492,14 @@ class SystemDashboardPro:
         gpu_info = tk.Frame(gpu_card, bg=ModernTheme.BG_CARD)
         gpu_info.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
         
-        gpu_found = False
-        try:
-            result = subprocess.run(['wmic', 'path', 'win32_VideoController', 'get', 'name'],
-                                  capture_output=True, text=True, timeout=3, creationflags=subprocess.CREATE_NO_WINDOW)
-            if result.returncode == 0:
-                gpu_names = [line.strip() for line in result.stdout.split('\n')[1:] if line.strip() and line.strip() != 'Name']
-                if gpu_names:
-                    gpu_found = True
-                    for i, gpu in enumerate(gpu_names[:3]):
-                        self.create_info_row(gpu_info, f"GPU {i+1}:", gpu[:35]).pack(fill=tk.X, pady=3)
-        except:
-            pass
-        
-        if not gpu_found:
+        gpu_list = self.get_gpu_info_advanced()
+        if gpu_list:
+            for i, gpu in enumerate(gpu_list):
+                self.create_info_row(gpu_info, f"GPU {i+1}:", gpu['name'][:25]).pack(fill=tk.X, pady=2)
+                if gpu['memory'] != "Shared/N/A":
+                    self.create_info_row(gpu_info, f"  • Memory:", gpu['memory']).pack(fill=tk.X, pady=1)
+                self.create_info_row(gpu_info, f"  • Driver:", gpu['driver']).pack(fill=tk.X, pady=1)
+        else:
             tk.Label(gpu_info, text="✓ Integrated Graphics", font=("Segoe UI", 10),
                     bg=ModernTheme.BG_CARD, fg=ModernTheme.ACCENT_LIME).pack(pady=10)
         
@@ -1499,35 +1544,18 @@ class SystemDashboardPro:
         storage_info = tk.Frame(storage_card, bg=ModernTheme.BG_CARD)
         storage_info.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
         
-        storage_found = False
-        try:
-            result = subprocess.run(['wmic', 'diskdrive', 'get', 'model,size'],
-                                  capture_output=True, text=True, timeout=3, creationflags=subprocess.CREATE_NO_WINDOW)
-            if result.returncode == 0:
-                lines = [l.strip() for l in result.stdout.split('\n')[1:] if l.strip() and 'Model' not in l]
-                for i, line in enumerate(lines[:4]):
-                    if line:
-                        parts = line.rsplit(None, 1)
-                        if len(parts) >= 2:
-                            storage_found = True
-                            try:
-                                model = parts[0][:30]
-                                size_gb = int(parts[1]) / (1024**3)
-                                self.create_info_row(storage_info, f"Drive {i+1}:", 
-                                                    f"{model} ({size_gb:.0f} GB)").pack(fill=tk.X, pady=2)
-                            except:
-                                pass
-        except:
-            pass
-        
-        if not storage_found:
+        disks = self.get_disk_info_advanced()
+        if disks:
+            for i, d in enumerate(disks[:4]):
+                self.create_info_row(storage_info, f"Drive {i+1}:", f"{d['model'][:20]}").pack(fill=tk.X, pady=2)
+                self.create_info_row(storage_info, f"  • Size:", f"{d['size']} ({d['type']})").pack(fill=tk.X, pady=1)
+        else:
             # Fallback to psutil
             for i, part in enumerate(psutil.disk_partitions()[:2]):
                 try:
                     usage = psutil.disk_usage(part.mountpoint)
                     self.create_info_row(storage_info, f"{part.device}", 
                                         f"{usage.total/(1024**3):.0f} GB").pack(fill=tk.X, pady=2)
-                    storage_found = True
                 except:
                     pass
         
@@ -1999,6 +2027,40 @@ class SystemDashboardPro:
             # (e.g., Razer Chroma SDK, Corsair iCUE SDK, Logitech G SDK)
         except Exception as e:
             print(f"Keyboard color error: {e}")
+
+    def toggle_net_load(self):
+        """Toggle network load test"""
+        if self.net_load_active:
+            self.net_load_active = False
+            if hasattr(self, 'btn_net_load'):
+                self.btn_net_load.config(text="🌐 Start Speed Test (Download)")
+            messagebox.showinfo("Network Test", "Network Load Test Stopped.")
+        else:
+            if messagebox.askyesno("Network Test", "This will download a test file repeatedly to test network speed.\n\nContinue?"):
+                self.net_load_active = True
+                if hasattr(self, 'btn_net_load'):
+                    self.btn_net_load.config(text="🛑 Stop Speed Test")
+                threading.Thread(target=self.net_load_loop, daemon=True).start()
+
+    def net_load_loop(self):
+        """Background network load loop"""
+        url = "http://speedtest.tele2.net/1MB.zip" # Public reliable test file
+        while self.net_load_active:
+            try:
+                start_t = time.time()
+                # Read 200KB chunk
+                with urllib.request.urlopen(url) as response:
+                    response.read(204800) # 200 KB
+                
+                # Ensure it takes exactly 1 second for the 200KB (200KB/s) if we wanted to limit it,
+                # but for a speed test we usually want max. 
+                # The original code limited it to 200KB/s. Let's keep it uncapped for a "Speed Test" 
+                # or maybe just burst it?
+                # The user asked for "working elements". The original code had a limiter.
+                # Let's try to just download continuously for max speed reading on the dashboard.
+                pass
+            except Exception as e:
+                time.sleep(1)
     
     def show_network(self):
         """Network monitoring view with all adapters"""
@@ -2015,6 +2077,13 @@ class SystemDashboardPro:
                              bg=ModernTheme.BG_DARK, fg=ModernTheme.ACCENT_PRIMARY)
         self.net_time_label.pack(side=tk.RIGHT)
         
+        # Speed Test Button
+        self.btn_net_load = tk.Button(header, text="🌐 Start Speed Test", 
+                                     font=("Segoe UI", 10), bg=ModernTheme.ACCENT_PRIMARY,
+                                     fg=ModernTheme.BG_DARK, relief=tk.FLAT,
+                                     command=self.toggle_net_load)
+        self.btn_net_load.pack(side=tk.RIGHT, padx=15)
+
         content = tk.Frame(self.content_frame, bg=ModernTheme.BG_DARK)
         content.pack(fill=tk.BOTH, expand=True, padx=30, pady=10)
         
@@ -2463,9 +2532,55 @@ class SystemDashboardPro:
                             kelvin = float(result.stdout.strip())
                             cpu_temp_value = int((kelvin / 10.0) - 273.15)
                     except: pass
+
+                # Method 6: Win32_PerfFormattedData_Counters_ThermalZoneInformation (Fallback)
+                if cpu_temp_value == 0:
+                    try:
+                        result = subprocess.run(['wmic', 'path', 'Win32_PerfFormattedData_Counters_ThermalZoneInformation', 'get', 'Temperature'],
+                                              capture_output=True, text=True, timeout=1, creationflags=subprocess.CREATE_NO_WINDOW)
+                        if result.returncode == 0:
+                            lines = [l.strip() for l in result.stdout.split('\n') if l.strip() and l.strip().isdigit()]
+                            if lines:
+                                val = int(lines[0])
+                                if val > 2700: cpu_temp_value = int((val / 10.0) - 273.15)
+                                elif val > 200: cpu_temp_value = int(val - 273.15)
+                                else: cpu_temp_value = val
+                    except: pass
                 
                 self.ui_data["cpu_temp"] = cpu_temp_value if cpu_temp_value > 0 else 0
                 
+                # Fan Speed (WMI + Fallback)
+                fan_speed_val = "-- RPM"
+                try:
+                    speeds = []
+                    # 1. OpenHardwareMonitor
+                    if self.wmi_obj:
+                        try:
+                            for s in self.wmi_obj.Sensor():
+                                if s.SensorType == u'Fan': speeds.append(int(s.Value))
+                        except: pass
+                    
+                    # 2. Win32_Fan (Fallback)
+                    if not speeds:
+                        try:
+                            res = subprocess.run(['wmic', 'path', 'Win32_Fan', 'get', 'DesiredSpeed'],
+                                               capture_output=True, text=True, timeout=1, creationflags=subprocess.CREATE_NO_WINDOW)
+                            if res.returncode == 0:
+                                lines = [l.strip() for l in res.stdout.split('\n') if l.strip() and l.strip().isdigit()]
+                                for l in lines:
+                                    if int(l) > 0: speeds.append(int(l))
+                        except: pass
+                    
+                    if speeds:
+                        fan_speed_val = f"{speeds[0]} RPM"
+                        # Store second fan if available
+                        self.ui_data["fan2"] = f"{speeds[1]} RPM" if len(speeds) > 1 else "-- RPM"
+                    else:
+                        self.ui_data["fan2"] = "-- RPM"
+                        
+                except: pass
+                self.ui_data["fan_speed"] = fan_speed_val
+
                 # GPU (try nvidia-smi)
                 try:
                     result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu', 
@@ -2489,13 +2604,27 @@ class SystemDashboardPro:
                 # Disk
                 dio = psutil.disk_io_counters(perdisk=True)
                 total_read = total_write = 0
+                max_active_time = 0
+                
                 for dname, cnt in dio.items():
                     if dname in last_disk_io:
                         prev = last_disk_io[dname]
                         total_read += (cnt.read_bytes - prev.read_bytes) / dt
                         total_write += (cnt.write_bytes - prev.write_bytes) / dt
+                        
+                        # Calculate active time percentage if available (Windows)
+                        if hasattr(cnt, 'read_time') and hasattr(cnt, 'write_time'):
+                            active_ms = (cnt.read_time - prev.read_time) + (cnt.write_time - prev.write_time)
+                            active_pct = (active_ms / (dt * 1000.0)) * 100.0
+                            max_active_time = max(max_active_time, active_pct)
                 
-                self.ui_data["disk_p"] = min(100, ((total_read + total_write) / (1024**2)) * 2)
+                # Use max active time across all drives as the "System Disk Load", capped at 100%
+                if max_active_time > 0:
+                    self.ui_data["disk_p"] = min(100, max_active_time)
+                else:
+                    # Fallback if active time not available (e.g. some OS or initial)
+                    self.ui_data["disk_p"] = min(100, ((total_read + total_write) / (1024**2)) * 2)
+                    
                 last_disk_io = dio
                 
                 # History
@@ -2731,19 +2860,15 @@ class SystemDashboardPro:
                         pass
                 
                 # Update fan speeds
-                if hasattr(self, 'mon_fan1') and self.mon_fan1.winfo_exists() and self.wmi_obj:
-                    try:
-                        fan_speeds = []
-                        for sensor in self.wmi_obj.Sensor():
-                            if sensor.SensorType == u'Fan':
-                                fan_speeds.append(int(sensor.Value))
-                        
-                        if len(fan_speeds) > 0:
-                            self.mon_fan1.config(text=f"{fan_speeds[0]} RPM")
-                        if len(fan_speeds) > 1 and hasattr(self, 'mon_fan2') and self.mon_fan2.winfo_exists():
-                            self.mon_fan2.config(text=f"{fan_speeds[1]} RPM")
-                    except:
-                        pass
+                if hasattr(self, 'mon_fan1') and self.mon_fan1.winfo_exists():
+                    fan1 = self.ui_data.get("fan_speed", "-- RPM")
+                    if hasattr(self, 'info_labels') and "CPU Fan:" in self.info_labels and self.info_labels["CPU Fan:"].winfo_exists():
+                        self.info_labels["CPU Fan:"].config(text=fan1)
+                    
+                    if hasattr(self, 'mon_fan2') and self.mon_fan2.winfo_exists():
+                        fan2 = self.ui_data.get("fan2", "-- RPM")
+                        if hasattr(self, 'info_labels') and "System Fan:" in self.info_labels and self.info_labels["System Fan:"].winfo_exists():
+                            self.info_labels["System Fan:"].config(text=fan2)
             
             # Update storage page if active
             elif self.current_section == "storage":
@@ -2782,9 +2907,15 @@ class SystemDashboardPro:
         
         self.root.after(250, self.update_ui)  # 250ms for ultra-responsive 144fps UI
     
-    def optimize_ram(self):
-        """Optimize RAM usage - Silent mode"""
+    def optimize_system(self):
+        """Optimize both RAM and CPU"""
         threading.Thread(target=self._optimize_ram_thread, daemon=True).start()
+        threading.Thread(target=self._optimize_cpu_thread, daemon=True).start()
+        messagebox.showinfo("Optimization", "System optimization started (RAM Clean + CPU Priority Adjustment)")
+
+    def optimize_ram(self):
+        """Legacy method"""
+        self.optimize_system()
     
     def _optimize_ram_thread(self):
         """Background RAM optimization - Silent"""
