@@ -1,16 +1,16 @@
 $ErrorActionPreference = "Stop"
 
-$appName = "SystemDashboardPro"
+$appName = "RaceTelemetryConsole"
 # Install to Local AppData (standard user location)
 $installDir = "$env:LOCALAPPDATA\Programs\$appName"
-$sourceExe = "dist\SystemDashboardPro.exe"
+$sourceExe = "dist\RaceTelemetryConsole.exe"
 $sourceConfig = "dashboard_config.json"
 $targetExe = "$installDir\$appName.exe"
 $targetConfig = "$installDir\dashboard_config.json"
 
 # Check if build exists
 if (!(Test-Path $sourceExe)) {
-    Write-Error "Build not found! Please run the build script first."
+    Write-Error "Build not found! Please run build_app.bat first."
     exit 1
 }
 
@@ -23,11 +23,11 @@ if (!(Test-Path $installDir)) {
     Write-Host "Created directory."
 }
 
-# 2. Copy Executable
+# 2. Copy Executable (engine_start.wav is bundled inside the exe)
 Copy-Item -Path $sourceExe -Destination $targetExe -Force
 Write-Host "Copied executable."
 
-# 3. Copy Config and Data if they exist (to preserve settings)
+# 3. Copy Config (to preserve settings)
 if (Test-Path $sourceConfig) {
     Copy-Item -Path $sourceConfig -Destination $targetConfig -Force
     Write-Host "Copied configuration."
@@ -36,16 +36,15 @@ if (Test-Path $sourceConfig) {
 # 4. Create Desktop Shortcut
 $wshShell = New-Object -ComObject WScript.Shell
 $desktopPath = [Environment]::GetFolderPath("Desktop")
-$shortcutPath = "$desktopPath\System Dashboard Pro.lnk"
+$shortcutPath = "$desktopPath\Race Telemetry Console.lnk"
 
 $shortcut = $wshShell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $targetExe
 $shortcut.WorkingDirectory = $installDir
-$shortcut.Description = "Advanced System Monitoring Dashboard"
+$shortcut.Description = "Race Telemetry Console - live system monitor"
 $shortcut.IconLocation = "$targetExe,0"
 $shortcut.Save()
 
 Write-Host "--------------------------------"
 Write-Host "Installation Complete!"
-Write-Host "Shortcut created on your Desktop."
-Write-Host "You can now delete the 'dist' and 'build' folders if you wish."
+Write-Host "Shortcut 'Race Telemetry Console' created on your Desktop."

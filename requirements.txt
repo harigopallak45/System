@@ -1,5 +1,3 @@
 psutil
-wmi
-pycaw
-comtypes
-screen-brightness-control
+# tkinter ships with Python (standard library) — no install needed.
+# GPU stats (utilization/temp/fan) use nvidia-smi if present — no package required.

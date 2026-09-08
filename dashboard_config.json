@@ -1,7 +1,13 @@
 {
-    "threshold_ram": 85,
-    "threshold_cpu": 85,
-    "monitor_interval": 250,
-    "auto_optimize_enabled": true,
-    "silent_mode": true
+  "threshold_cpu": 85,
+  "threshold_ram": 85,
+  "threshold_gpu": 90,
+  "threshold_temp": 85,
+  "monitor_interval": 500,
+  "ui_refresh_ms": 200,
+  "startup_sound": true,
+  "alert_sound": true,
+  "taskbar_flash": true,
+  "auto_optimize": true,
+  "accent": "green"
 }
