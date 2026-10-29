@@ -156,3 +156,5 @@ desktop.ini
 # Project specific
 system_performance_log.csv
 dashboard_config.json.bak
+
+*.exe
