@@ -1,0 +1,17 @@
+[Unit]
+Description=AutoBoost Performance Daemon for Linux
+After=network.target systemd-resolved.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/autoboost-daemon
+Restart=always
+RestartSec=5
+KillMode=process
+MemoryMax=64M
+CPUQuota=10%
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# AutoBoost Management CLI for Linux Servers
+# ==============================================================================
+
+set -e
+
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[0;34m"
+CYAN="\033[0;36m"
+BOLD="\033[1m"
+NC="\033[0m"
+
+LOG_FILE="/var/log/autoboost.log"
+CONFIG_FILE="/etc/autoboost/autoboost.conf"
+SERVICE_NAME="autoboost.service"
+STATE_FILE="/run/autoboost.state"
+
+SCRIPT_ARGS=("$@")
+export TERM="${TERM:-xterm-256color}"
+
+require_root() {
+    if [ "$EUID" -ne 0 ]; then
+        exec sudo "$0" "${SCRIPT_ARGS[@]}"
+    fi
+}
+
+draw_bar() {
+    local pct=$1
+    local width=30
+    local filled=$(( pct * width / 100 ))
+    local empty=$(( width - filled ))
+    local color=$GREEN
+    if [ "$pct" -ge 80 ]; then
+        color=$RED
+    elif [ "$pct" -ge 60 ]; then
+        color=$YELLOW
+    fi
+
+    printf "${color}["
+    for ((i=0; i<filled; i++)); do printf "■"; done
+    for ((i=0; i<empty; i++)); do printf " "; done
+    printf "] %3d%%${NC}" "$pct"
+}
+
+get_ram_info() {
+    local total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local avail_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    local buff_kb=$(grep Buffers /proc/meminfo | awk '{print $2}')
+    local cached_kb=$(grep "^Cached:" /proc/meminfo | awk '{print $2}')
+    local used_kb=$(( total_kb - avail_kb ))
+    local ram_pct=$(( (used_kb * 100) / total_kb ))
+
+    RAM_TOTAL_MB=$(( total_kb / 1024 ))
+    RAM_USED_MB=$(( used_kb / 1024 ))
+    RAM_AVAIL_MB=$(( avail_kb / 1024 ))
+    RAM_CACHE_MB=$(( (buff_kb + cached_kb) / 1024 ))
+    RAM_PCT=$ram_pct
+}
+
+get_cpu_info() {
+    # 0.5s measurement
+    local cpu1=($(grep '^cpu ' /proc/stat))
+    sleep 0.5
+    local cpu2=($(grep '^cpu ' /proc/stat))
+
+    local idle1=$(( ${cpu1[4]} + ${cpu1[5]} ))
+    local idle2=$(( ${cpu2[4]} + ${cpu2[5]} ))
+
+    local total1=0
+    for val in "${cpu1[@]:1}"; do total1=$(( total1 + val )); done
+    local total2=0
+    for val in "${cpu2[@]:1}"; do total2=$(( total2 + val )); done
+
+    local delta_idle=$(( idle2 - idle1 ))
+    local delta_total=$(( total2 - total1 ))
+
+    if [ "$delta_total" -gt 0 ]; then
+        CPU_PCT=$(( (1000 * (delta_total - delta_idle)) / delta_total / 10 ))
+    else
+        CPU_PCT=0
+    fi
+}
+
+get_swap_info() {
+    local total_kb=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+    local free_kb=$(grep SwapFree /proc/meminfo | awk '{print $2}')
+    if [ "$total_kb" -gt 0 ]; then
+        local used_kb=$(( total_kb - free_kb ))
+        SWAP_TOTAL_MB=$(( total_kb / 1024 ))
+        SWAP_USED_MB=$(( used_kb / 1024 ))
+        SWAP_PCT=$(( (used_kb * 100) / total_kb ))
+    else
+        SWAP_TOTAL_MB=0
+        SWAP_USED_MB=0
+        SWAP_PCT=0
+    fi
+}
+
+cmd_status() {
+    echo -e "${BOLD}${CYAN}======================================================${NC}"
+    echo -e "${BOLD}${CYAN}            ⚡ AutoBoost Server Status ⚡            ${NC}"
+    echo -e "${BOLD}${CYAN}======================================================${NC}"
+
+    get_ram_info
+    get_cpu_info
+    get_swap_info
+
+    echo -ne "  ${BOLD}CPU Usage:${NC}   "
+    draw_bar $CPU_PCT
+    echo ""
+
+    echo -ne "  ${BOLD}RAM Usage:${NC}   "
+    draw_bar $RAM_PCT
+    echo -e " (${RAM_USED_MB}MB used / ${RAM_TOTAL_MB}MB total, ${RAM_AVAIL_MB}MB avail, ${RAM_CACHE_MB}MB cache)"
+
+    if [ "$SWAP_TOTAL_MB" -gt 0 ]; then
+        echo -ne "  ${BOLD}Swap Usage:${NC}  "
+        draw_bar $SWAP_PCT
+        echo -e " (${SWAP_USED_MB}MB used / ${SWAP_TOTAL_MB}MB total)"
+    fi
+
+    echo ""
+    echo -e "${BOLD}--- Service Information ---${NC}"
+    local is_active=$(systemctl is-active $SERVICE_NAME 2>/dev/null || echo "inactive")
+    local is_enabled=$(systemctl is-enabled $SERVICE_NAME 2>/dev/null || echo "disabled")
+
+    if [ "$is_active" == "active" ]; then
+        echo -e "  Daemon Status:  ${GREEN}● RUNNING (Active)${NC}"
+    else
+        echo -e "  Daemon Status:  ${RED}○ STOPPED (${is_active})${NC}"
+    fi
+    echo -e "  Auto-Start:     ${CYAN}${is_enabled}${NC}"
+
+    if [ -f "$STATE_FILE" ]; then
+        echo ""
+        echo -e "${BOLD}--- Last State ---${NC}"
+        sed 's/^/  /' "$STATE_FILE"
+    fi
+
+    echo ""
+    echo -e "${BOLD}--- Recent Boost Events (Last 3) ---${NC}"
+    if [ -f "$LOG_FILE" ]; then
+        grep "Boost Complete" "$LOG_FILE" | tail -n 3 | while read -r line; do
+            echo -e "  ${YELLOW}$line${NC}"
+        done
+    else
+        echo -e "  ${YELLOW}No logs found yet.${NC}"
+    fi
+    echo -e "${BOLD}${CYAN}======================================================${NC}"
+}
+
+cmd_boost() {
+    require_root
+    echo -e "${BOLD}${YELLOW}⚡ Executing Instant Manual AutoBoost...${NC}"
+    /usr/bin/python3 /usr/local/bin/autoboost-daemon --once
+    echo ""
+    echo -e "${GREEN}✔ Boost completed successfully!${NC}"
+    cmd_status
+}
+
+cmd_logs() {
+    local lines=${2:-20}
+    if [ "$1" == "-f" ] || [ "$2" == "-f" ]; then
+        tail -f "$LOG_FILE"
+    else
+        echo -e "${BOLD}${CYAN}--- Last $lines Boost Log Entries ---${NC}"
+        tail -n "$lines" "$LOG_FILE"
+    fi
+}
+
+cmd_start() {
+    require_root
+    systemctl start $SERVICE_NAME
+    echo -e "${GREEN}✔ AutoBoost service started.${NC}"
+}
+
+cmd_stop() {
+    require_root
+    systemctl stop $SERVICE_NAME
+    echo -e "${YELLOW}✔ AutoBoost service stopped.${NC}"
+}
+
+cmd_restart() {
+    require_root
+    systemctl restart $SERVICE_NAME
+    echo -e "${GREEN}✔ AutoBoost service restarted.${NC}"
+}
+
+cmd_enable() {
+    require_root
+    systemctl enable $SERVICE_NAME
+    echo -e "${GREEN}✔ AutoBoost enabled to start automatically on system boot.${NC}"
+}
+
+cmd_disable() {
+    require_root
+    systemctl disable $SERVICE_NAME
+    echo -e "${YELLOW}✔ AutoBoost auto-start disabled.${NC}"
+}
+
+cmd_menu() {
+    while true; do
+        if [ -t 1 ]; then clear; fi
+        echo -e "${BOLD}${CYAN}======================================================${NC}"
+        echo -e "${BOLD}${CYAN}            ⚡ AutoBoost Server Manager ⚡            ${NC}"
+        echo -e "${BOLD}${CYAN}======================================================${NC}"
+        get_ram_info
+        get_cpu_info
+        echo -ne "  CPU: "
+        draw_bar $CPU_PCT
+        echo ""
+        echo -ne "  RAM: "
+        draw_bar $RAM_PCT
+        echo -e " (${RAM_AVAIL_MB}MB free of ${RAM_TOTAL_MB}MB)"
+        echo -e "${CYAN}------------------------------------------------------${NC}"
+        echo -e "  [1] View Detailed Status & Metrics"
+        echo -e "  [2] Trigger Instant Manual Boost Now"
+        echo -e "  [3] View Recent Logs"
+        echo -e "  [4] Start Background Daemon"
+        echo -e "  [5] Stop Background Daemon"
+        echo -e "  [6] Restart Background Daemon"
+        echo -e "  [7] Enable Boot Startup (systemd)"
+        echo -e "  [8] Disable Boot Startup"
+        echo -e "  [9] View Configuration (${CONFIG_FILE})"
+        echo -e "  [0] Exit"
+        echo -e "${BOLD}${CYAN}======================================================${NC}"
+        read -p "Select an option (0-9): " choice
+
+        case $choice in
+            1) cmd_status; read -p "Press Enter to continue..." ;;
+            2) cmd_boost; read -p "Press Enter to continue..." ;;
+            3) cmd_logs 30; read -p "Press Enter to continue..." ;;
+            4) cmd_start; sleep 1 ;;
+            5) cmd_stop; sleep 1 ;;
+            6) cmd_restart; sleep 1 ;;
+            7) cmd_enable; sleep 1 ;;
+            8) cmd_disable; sleep 1 ;;
+            9) cat "$CONFIG_FILE"; read -p "Press Enter to continue..." ;;
+            0) exit 0 ;;
+            *) echo "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+case "$1" in
+    status)  cmd_status ;;
+    boost)   cmd_boost ;;
+    logs)    cmd_logs "$2" "$3" ;;
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    enable)  cmd_enable ;;
+    disable) cmd_disable ;;
+    config)  cat "$CONFIG_FILE" ;;
+    "")      cmd_menu ;;
+    *)
+        echo -e "${BOLD}Usage:${NC} autoboost [status|boost|logs|start|stop|restart|enable|disable|config]"
+        exit 1
+        ;;
+esac
